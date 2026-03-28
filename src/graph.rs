@@ -243,6 +243,9 @@ pub struct Node {
 pub struct Graph {
     nodes: Vec<Node>,
     outputs: Vec<NodeId>,
+    /// Number of forward-pass nodes (set by `differentiate()`).
+    /// Nodes 0..forward_node_count are forward; the rest are backward.
+    pub forward_node_count: Option<usize>,
 }
 
 impl Graph {
@@ -250,6 +253,7 @@ impl Graph {
         Self {
             nodes: Vec::new(),
             outputs: Vec::new(),
+            forward_node_count: None,
         }
     }
 

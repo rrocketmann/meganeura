@@ -1,6 +1,6 @@
 use crate::graph::{Graph, Node, NodeId, Op};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Identifies which shader and entry point to use.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -182,6 +182,14 @@ pub struct ExecutionPlan {
     pub param_grad_pairs: Vec<(BufferRef, BufferRef)>,
     /// LSE buffers allocated for MultiHeadAttn forward nodes: (node_id, buffer).
     pub lse_buffers: Vec<(NodeId, BufferRef)>,
+    /// Number of dispatches in the forward pass (0..this are forward, rest backward).
+    /// Set when compiling a differentiated graph.
+    #[serde(default)]
+    pub forward_dispatch_count: usize,
+    /// Buffers that hold per-sample activations (need double-buffering for pipelining).
+    /// Excludes parameters, gradients, constants.
+    #[serde(default)]
+    pub activation_buffers: Vec<BufferRef>,
 }
 
 /// Compile a differentiated graph into an ExecutionPlan.
@@ -211,6 +219,8 @@ impl<'a> Compiler<'a> {
                 loss_buffer: None,
                 param_grad_pairs: Vec::new(),
                 lse_buffers: Vec::new(),
+                forward_dispatch_count: 0,
+                activation_buffers: Vec::new(),
             },
             node_buffers: HashMap::new(),
         }
@@ -254,8 +264,19 @@ impl<'a> Compiler<'a> {
         }
 
         // Second pass: emit dispatches for each non-leaf node
+        let fwd_count = self
+            .graph
+            .forward_node_count
+            .unwrap_or(self.graph.nodes().len());
         for node in self.graph.nodes() {
+            if node.id as usize == fwd_count {
+                self.plan.forward_dispatch_count = self.plan.dispatches.len();
+            }
             self.compile_node(node);
+        }
+        // If no backward nodes, all dispatches are forward
+        if self.plan.forward_dispatch_count == 0 && fwd_count >= self.graph.nodes().len() {
+            self.plan.forward_dispatch_count = self.plan.dispatches.len();
         }
 
         // Generate labels for profiling
@@ -323,6 +344,40 @@ impl<'a> Compiler<'a> {
                 }
             }
         }
+
+        // Classify activation buffers: everything written by forward dispatches
+        // that isn't a parameter, constant, or gradient buffer.
+        let mut shared: HashSet<u32> = HashSet::new();
+        for (_, buf) in &self.plan.param_buffers {
+            shared.insert(buf.0);
+        }
+        for (buf, _) in &self.plan.constant_buffers {
+            shared.insert(buf.0);
+        }
+        for (param, grad) in &self.plan.param_grad_pairs {
+            shared.insert(param.0);
+            shared.insert(grad.0);
+        }
+        if let Some(loss) = self.plan.loss_buffer {
+            shared.insert(loss.0);
+        }
+        // Collect buffers written by forward dispatches (activations + inputs + LSE)
+        for d in &self.plan.dispatches[..self.plan.forward_dispatch_count] {
+            if !shared.contains(&d.output_buffer.0) {
+                self.plan.activation_buffers.push(d.output_buffer);
+            }
+            if let Some(extra) = d.extra_output {
+                if !shared.contains(&extra.0) {
+                    self.plan.activation_buffers.push(extra);
+                }
+            }
+        }
+        // Also include input buffers (different data per micro-batch)
+        for (_, buf) in &self.plan.input_buffers {
+            self.plan.activation_buffers.push(*buf);
+        }
+        self.plan.activation_buffers.sort_by_key(|b| b.0);
+        self.plan.activation_buffers.dedup();
     }
 
     fn compile_node(&mut self, node: &Node) {

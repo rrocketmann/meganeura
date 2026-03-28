@@ -108,6 +108,7 @@ fn main() {
     let mut runs: usize = 5;
     let mut force = false;
     let mut profile = false;
+    let mut pipeline_micro_batches: usize = 0; // 0 = disabled
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -115,6 +116,9 @@ fn main() {
             "--runs" => runs = args.next().expect("--runs value").parse().unwrap(),
             "--force" => force = true,
             "--profile" => profile = true,
+            "--pipeline" => {
+                pipeline_micro_batches = args.next().expect("--pipeline N").parse().unwrap()
+            }
             _ => {
                 eprintln!("unknown arg: {}", arg);
                 std::process::exit(1);
@@ -152,9 +156,11 @@ fn main() {
     eprintln!("compiling training session (fwd + bwd + SGD)...");
     let mut train_session = build_session(&training_g);
     eprintln!(
-        "  train: {} buffers, {} dispatches, {} barrier groups",
+        "  train: {} buffers ({} activation), {} dispatches ({} fwd), {} barrier groups",
         train_session.plan().buffers.len(),
+        train_session.plan().activation_buffers.len(),
         train_session.plan().dispatches.len(),
+        train_session.plan().forward_dispatch_count,
         train_session.num_groups()
     );
 
@@ -305,6 +311,38 @@ fn main() {
         let elapsed = t0.elapsed().as_secs_f64();
         train_latencies.push(elapsed);
         eprintln!("  train run {}: {:.2}ms", i + 1, elapsed * 1000.0);
+    }
+
+    // --- Benchmark pipelined micro-batch step (opt-in via --pipeline N) ---
+    if pipeline_micro_batches >= 2 {
+        let n_mb = pipeline_micro_batches;
+        eprintln!(
+            "benchmarking pipelined {}-micro-batch ({} runs)...",
+            n_mb, runs
+        );
+        train_session.set_learning_rate(1e-5);
+        for i in 0..runs {
+            let t0 = Instant::now();
+            train_session.pipelined_step(n_mb, |_mb_idx, set, session| {
+                session.set_input_set("noisy_actions", &noisy_actions, set);
+                session.set_input_set("timestep", &timestep, set);
+                for li in 0..config.expert.num_layers {
+                    if li % config.expert.self_attn_every_n_layers != 0 {
+                        session.set_input_set(&format!("vlm_kv_layer_{}", li), &vlm_kv, set);
+                    }
+                }
+                session.set_input_set("target_actions", &target_actions, set);
+            });
+            train_session.wait();
+            let elapsed = t0.elapsed().as_secs_f64();
+            let per_mb = elapsed * 1000.0 / n_mb as f64;
+            eprintln!(
+                "  pipe run {}: {:.2}ms total ({:.2}ms/micro-batch)",
+                i + 1,
+                elapsed * 1000.0,
+                per_mb
+            );
+        }
     }
 
     // --- Statistics ---

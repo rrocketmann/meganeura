@@ -462,6 +462,15 @@ pub struct Session {
     /// Pending SGD learning rate. When set, `step()` appends SGD updates
     /// to the same GPU submission (avoiding a separate submit/wait cycle).
     pending_lr: Option<f32>,
+    /// Alternate activation buffers for micro-batch pipelining (buffer set 1).
+    /// Indexed by the same BufferRef as the primary set; None for shared buffers.
+    alt_buffers: Vec<Option<blade_graphics::Buffer>>,
+    /// Pre-built buffer array for set 1 (activations remapped, rest shared).
+    buffers_set1: Vec<blade_graphics::Buffer>,
+    /// Forward barrier groups (computed from forward dispatches only).
+    fwd_groups: Vec<std::ops::Range<usize>>,
+    /// Backward barrier groups (computed from backward dispatches only).
+    bwd_groups: Vec<std::ops::Range<usize>>,
 }
 
 impl Session {
@@ -682,6 +691,50 @@ impl Session {
             }
         }
 
+        // Allocate alternate activation buffers for micro-batch pipelining
+        let activation_set: HashSet<u32> = plan.activation_buffers.iter().map(|b| b.0).collect();
+        let alt_buffers: Vec<Option<blade_graphics::Buffer>> = (0..plan.buffers.len())
+            .map(|i| {
+                if activation_set.contains(&(i as u32)) {
+                    let size = plan.buffers[i].max(4);
+                    Some(gpu.create_buffer(blade_graphics::BufferDesc {
+                        name: &format!("buf_{}_alt", i),
+                        size: size as u64,
+                        memory: blade_graphics::Memory::Shared,
+                    }))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Pre-build buffer array for set 1 (avoids per-step cloning)
+        let buffers_set1: Vec<blade_graphics::Buffer> = (0..buffers.len())
+            .map(|i| {
+                if let Some(ref alt) = alt_buffers[i] {
+                    alt.clone()
+                } else {
+                    buffers[i].clone()
+                }
+            })
+            .collect();
+
+        // Compute separate forward and backward barrier groups
+        let fwd_count = plan.forward_dispatch_count;
+        let fwd_groups = compute_groups(&plan.dispatches[..fwd_count]);
+        let bwd_dispatches = &plan.dispatches[fwd_count..];
+        let bwd_groups_raw = compute_groups(bwd_dispatches);
+        // Offset backward group ranges by fwd_count
+        let bwd_groups: Vec<std::ops::Range<usize>> = bwd_groups_raw
+            .into_iter()
+            .map(|r| (r.start + fwd_count)..(r.end + fwd_count))
+            .collect();
+        log::info!(
+            "pipeline: {} fwd groups + {} bwd groups",
+            fwd_groups.len(),
+            bwd_groups.len(),
+        );
+
         let pipelines = Pipelines::new(&gpu, &plan);
         let encoder = gpu.create_command_encoder(blade_graphics::CommandEncoderDesc {
             name: "meganeura",
@@ -699,6 +752,10 @@ impl Session {
             last_submit_ns: 0,
             profiling: false,
             pending_lr: None,
+            alt_buffers,
+            buffers_set1,
+            fwd_groups,
+            bwd_groups,
         }
     }
 
@@ -1446,6 +1503,181 @@ impl Session {
     /// Number of barrier groups (compute passes) in the dispatch sequence.
     pub fn num_groups(&self) -> usize {
         self.groups.len()
+    }
+
+    /// Get the buffer for a given BufferRef + set (0=primary, 1=alternate).
+    fn buf_for_set(&self, buf_ref: BufferRef, set: usize) -> blade_graphics::BufferPiece {
+        if set == 1 {
+            if let Some(ref alt) = self.alt_buffers[buf_ref.0 as usize] {
+                return alt.at(0);
+            }
+        }
+        self.buffers[buf_ref.0 as usize].at(0)
+    }
+
+    /// Build a buffer array for a given set (0=primary, 1=alternate).
+    /// Shared buffers (params, grads, constants) stay the same;
+    /// activation buffers use the alternate copy for set 1.
+    fn buffers_for_set(&self, set: usize) -> Vec<blade_graphics::Buffer> {
+        if set == 0 {
+            return self.buffers.clone();
+        }
+        (0..self.buffers.len())
+            .map(|i| {
+                if let Some(ref alt) = self.alt_buffers[i] {
+                    alt.clone()
+                } else {
+                    self.buffers[i].clone()
+                }
+            })
+            .collect()
+    }
+
+    /// Set input data for a specific buffer set (0=primary, 1=alternate).
+    pub fn set_input_set(&mut self, name: &str, data: &[f32], set: usize) {
+        let buf_ref = self
+            .plan
+            .input_buffers
+            .iter()
+            .find(|(n, _)| n == name)
+            .unwrap_or_else(|| panic!("unknown input: {name}"))
+            .1;
+        let buffer = if set == 1 {
+            self.alt_buffers[buf_ref.0 as usize]
+                .as_ref()
+                .expect("input buffer should have alt")
+        } else {
+            &self.buffers[buf_ref.0 as usize]
+        };
+        unsafe {
+            let ptr = buffer.data() as *mut f32;
+            std::ptr::copy_nonoverlapping(data.as_ptr(), ptr, data.len());
+        }
+    }
+
+    /// Execute a pipelined training step with multiple micro-batches.
+    ///
+    /// Overlaps each micro-batch's backward pass with the next micro-batch's
+    /// forward pass, hiding forward barrier overhead behind backward compute.
+    /// Gradients are accumulated across micro-batches via repeated backward
+    /// passes writing to the same gradient buffers (the backward graph
+    /// overwrites, so the last micro-batch's gradients are used — for true
+    /// accumulation, call with num_micro_batches=1 multiple times and
+    /// accumulate externally).
+    ///
+    /// `set_inputs_fn` is called with (micro_batch_index, buffer_set, &mut Session)
+    /// to upload each micro-batch's input data via `set_input_set()`.
+    pub fn pipelined_step(
+        &mut self,
+        num_micro_batches: usize,
+        mut set_inputs_fn: impl FnMut(usize, usize, &mut Self),
+    ) {
+        assert!(num_micro_batches >= 1);
+        self.wait();
+        self.encoder.start();
+        self.drain_gpu_timings();
+
+        let fwd_count = self.plan.forward_dispatch_count;
+
+        if num_micro_batches == 1 {
+            // No pipelining: run forward + backward normally
+            set_inputs_fn(0, 0, self);
+            for gi in 0..self.groups.len() {
+                let group = self.groups[gi].clone();
+                let mut pass = self.encoder.compute("step");
+                for i in group {
+                    let dispatch = &self.plan.dispatches[i];
+                    let pipeline = self.pipelines.get(dispatch);
+                    let mut pc = pass.with(pipeline);
+                    Self::bind_dispatch(&self.buffers, dispatch, &mut pc);
+                    pc.dispatch(dispatch.workgroups);
+                }
+            }
+        } else {
+            // Clone buffer arrays to avoid borrow conflicts with set_inputs_fn
+            let bufs = [self.buffers.clone(), self.buffers_set1.clone()];
+            let fwd_groups = self.fwd_groups.clone();
+            let bwd_groups = self.bwd_groups.clone();
+
+            // Micro-batch 0: forward only (set 0)
+            set_inputs_fn(0, 0, self);
+            for group in &fwd_groups {
+                let mut pass = self.encoder.compute("fwd_0");
+                for i in group.clone() {
+                    let d = &self.plan.dispatches[i];
+                    let mut pc = pass.with(self.pipelines.get(d));
+                    Self::bind_dispatch(&bufs[0], d, &mut pc);
+                    pc.dispatch(d.workgroups);
+                }
+            }
+
+            // Micro-batches 1..N-1: overlap bwd[prev] + fwd[cur]
+            for mb in 1..num_micro_batches {
+                let bwd_set = (mb - 1) % 2;
+                let fwd_set = mb % 2;
+                set_inputs_fn(mb, fwd_set, self);
+
+                for gi in 0..bwd_groups.len().max(fwd_groups.len()) {
+                    let mut pass = self.encoder.compute("pipe");
+                    if gi < bwd_groups.len() {
+                        for i in bwd_groups[gi].clone() {
+                            let d = &self.plan.dispatches[i];
+                            let mut pc = pass.with(self.pipelines.get(d));
+                            Self::bind_dispatch(&bufs[bwd_set], d, &mut pc);
+                            pc.dispatch(d.workgroups);
+                        }
+                    }
+                    if gi < fwd_groups.len() {
+                        for i in fwd_groups[gi].clone() {
+                            let d = &self.plan.dispatches[i];
+                            let mut pc = pass.with(self.pipelines.get(d));
+                            Self::bind_dispatch(&bufs[fwd_set], d, &mut pc);
+                            pc.dispatch(d.workgroups);
+                        }
+                    }
+                }
+            }
+
+            // Last backward
+            let last_set = (num_micro_batches - 1) % 2;
+            for group in &bwd_groups {
+                let mut pass = self.encoder.compute("bwd_last");
+                for i in group.clone() {
+                    let d = &self.plan.dispatches[i];
+                    let mut pc = pass.with(self.pipelines.get(d));
+                    Self::bind_dispatch(&bufs[last_set], d, &mut pc);
+                    pc.dispatch(d.workgroups);
+                }
+            }
+        }
+
+        // SGD if learning rate is set
+        if let Some(learning_rate) = self.pending_lr {
+            let pipeline = &self.pipelines.map[&ShaderEntry::SgdUpdate];
+            let mut pass = self.encoder.compute("sgd_update");
+            for &(param_buf, grad_buf) in &self.plan.param_grad_pairs {
+                let len = (self.plan.buffers[param_buf.0 as usize] / 4) as u32;
+                let mut pc = pass.with(pipeline);
+                pc.bind(
+                    0,
+                    &SgdData {
+                        param: self.buffers[param_buf.0 as usize].at(0),
+                        grad: self.buffers[grad_buf.0 as usize].at(0),
+                        dst: self.buffers[param_buf.0 as usize].at(0),
+                        params: SgdParams {
+                            len,
+                            lr: learning_rate,
+                            _pad0: 0,
+                            _pad1: 0,
+                        },
+                    },
+                );
+                pc.dispatch([len.div_ceil(256), 1, 1]);
+            }
+        }
+
+        self.last_submit_ns = crate::profiler::now_ns();
+        self.sync_point = Some(self.gpu.submit(&mut self.encoder));
     }
 }
 

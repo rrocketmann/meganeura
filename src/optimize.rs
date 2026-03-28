@@ -395,6 +395,7 @@ fn clone_graph(graph: &Graph) -> Graph {
         new_graph.add_raw_node(node.op.clone(), node.inputs.clone(), node.ty.clone());
     }
     new_graph.set_outputs(graph.outputs().to_vec());
+    new_graph.forward_node_count = graph.forward_node_count;
     new_graph
 }
 

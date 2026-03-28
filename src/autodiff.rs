@@ -13,6 +13,7 @@ pub fn differentiate(forward: &Graph) -> Graph {
     for node in forward.nodes() {
         graph.add_raw_node(node.op.clone(), node.inputs.clone(), node.ty.clone());
     }
+    graph.forward_node_count = Some(forward.nodes().len());
 
     let loss_node = forward.outputs()[0];
 
