@@ -217,6 +217,8 @@ def main():
     parser.add_argument("--dtype", default="float32", choices=["float32", "float16", "bfloat16"])
     parser.add_argument("--chunk-size", type=int, default=50)
     parser.add_argument("--vlm-seq-len", type=int, default=16)
+    parser.add_argument("--no-compile", action="store_true",
+                        help="Disable torch.compile (eager mode)")
     args = parser.parse_args()
 
     if args.device is None:
@@ -272,6 +274,15 @@ def main():
     load_expert_weights(expert, state_dict)
     expert = expert.to(device=device, dtype=torch_dtype)
     expert.eval()
+
+    if not args.no_compile:
+        try:
+            expert = torch.compile(expert)
+            print("torch.compile: enabled", file=sys.stderr)
+        except Exception as e:
+            print(f"torch.compile: failed ({e}), using eager mode", file=sys.stderr)
+    else:
+        print("torch.compile: disabled (--no-compile)", file=sys.stderr)
 
     # --- Deterministic synthetic inputs (matches meganeura) ---
     noisy_actions, timestep, vlm_kv = make_deterministic_inputs(

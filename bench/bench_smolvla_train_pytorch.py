@@ -161,6 +161,8 @@ def main():
                         choices=["float32", "float16", "bfloat16"])
     parser.add_argument("--chunk-size", type=int, default=50)
     parser.add_argument("--vlm-seq-len", type=int, default=16)
+    parser.add_argument("--no-compile", action="store_true",
+                        help="Disable torch.compile (eager mode)")
     args = parser.parse_args()
 
     device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
@@ -214,6 +216,16 @@ def main():
                 torch.sin(torch.arange(p.numel(), dtype=dtype) * 0.01 + i).view_as(p) * 0.1
             )
 
+    # torch.compile for optimized kernels (default: enabled)
+    if not args.no_compile:
+        try:
+            expert = torch.compile(expert)
+            print("torch.compile: enabled", file=sys.stderr)
+        except Exception as e:
+            print(f"torch.compile: failed ({e}), using eager mode", file=sys.stderr)
+    else:
+        print("torch.compile: disabled (--no-compile)", file=sys.stderr)
+
     optimizer = torch.optim.SGD(expert.parameters(), lr=1e-5)
 
     noisy_actions = torch.zeros(1, chunk_size, action_dim, device=device, dtype=dtype)
@@ -266,6 +278,7 @@ def main():
 
     result = {
         "framework": "pytorch",
+        "torch_compile": not args.no_compile,
         "model": "smolvla_action_expert_gqa",
         "device": device,
         "dtype": args.dtype,

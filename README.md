@@ -20,7 +20,7 @@ Full GQA (15/5 heads, head_dim=64), exact backward through all ops including fus
 | GPU | Framework | Rev | Forward | Backward | Train step |
 |---|---|---|---|---|---|
 | Radeon 890M | meganeura | `af2b956` | **17.0 ms** | 163.1 ms | 180.1 ms |
-| Radeon 890M | PyTorch 2.5 ROCm | — | 28.4 ms | 68.8 ms | 97.3 ms |
+| Radeon 890M | PyTorch 2.5 ROCm (eager) | — | 28.4 ms | 68.8 ms | 97.3 ms |
 | Radeon 780M | meganeura | `637c4b1` | **14.5 ms** | 82.7 ms | **97.2 ms** |
 | Radeon 780M | PyTorch ROCm | — | ✗ | ✗ | ✗ |
 
@@ -29,7 +29,7 @@ SmolVLA action expert inference (chunk_size=50, vlm_seq_len=16, 10 denoise steps
 | GPU | Framework | Rev | ms / step | Steps/s |
 |---|---|---|---|---|
 | Radeon 890M | meganeura | `af2b956` | **18.1** | **55.1** |
-| Radeon 890M | PyTorch 2.5 ROCm | — | 27.8 | 36.0 |
+| Radeon 890M | PyTorch 2.5 ROCm (eager) | — | 27.8 | 36.0 |
 | Radeon 780M | meganeura | `637c4b1` | **14.5** | **69.0** |
 | Radeon 780M | PyTorch ROCm | — | ✗ | ✗ |
 
