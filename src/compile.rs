@@ -76,6 +76,10 @@ pub enum ShaderEntry {
     CacheWrite,
     CachedAttention,
     RoPEDynamic,
+    WinogradInputTransform,
+    WinogradOutputTransform,
+    WinogradBatchedMatMul,
+    WinogradBatchedMatMulSmall,
 }
 
 impl ShaderEntry {
@@ -146,6 +150,10 @@ impl ShaderEntry {
             ShaderEntry::CacheWrite => ShaderGroup::CacheWrite,
             ShaderEntry::CachedAttention => ShaderGroup::CachedAttention,
             ShaderEntry::RoPEDynamic => ShaderGroup::RoPEDynamic,
+            ShaderEntry::WinogradInputTransform => ShaderGroup::WinogradInputTransform,
+            ShaderEntry::WinogradOutputTransform => ShaderGroup::WinogradOutputTransform,
+            ShaderEntry::WinogradBatchedMatMul => ShaderGroup::WinogradBatchedMatMul,
+            ShaderEntry::WinogradBatchedMatMulSmall => ShaderGroup::WinogradBatchedMatMulSmall,
         }
     }
 
@@ -219,6 +227,10 @@ impl ShaderEntry {
             ShaderEntry::CacheWrite => "main",
             ShaderEntry::CachedAttention => "main",
             ShaderEntry::RoPEDynamic => "main",
+            ShaderEntry::WinogradInputTransform
+            | ShaderEntry::WinogradOutputTransform
+            | ShaderEntry::WinogradBatchedMatMul
+            | ShaderEntry::WinogradBatchedMatMulSmall => "main",
         }
     }
 }
@@ -273,10 +285,14 @@ pub struct ExecutionPlan {
     pub param_grad_pairs: Vec<(BufferRef, BufferRef)>,
     /// LSE buffers allocated for MultiHeadAttn forward nodes: (node_id, buffer).
     pub lse_buffers: Vec<(NodeId, BufferRef)>,
-    /// Derived parameters: buffer = horizontal concat of source parameters.
-    /// Created by the optimizer when fusing e.g. gate+up projections.
-    /// Format: (derived_buf, [(source_name, num_elements), ...])
-    pub derived_params: Vec<(BufferRef, Vec<(String, usize)>)>,
+    /// Derived parameters: buffer computed from source parameters.
+    /// Created by the optimizer when fusing e.g. gate+up projections or Winograd weight transforms.
+    /// Format: (derived_buf, [(source_name, num_elements), ...], transform)
+    pub derived_params: Vec<(
+        BufferRef,
+        Vec<(String, usize)>,
+        crate::graph::ParamTransform,
+    )>,
 }
 
 /// Compile a differentiated graph into an ExecutionPlan.
@@ -339,7 +355,10 @@ pub fn compile(graph: &Graph) -> ExecutionPlan {
                 .iter()
                 .map(|entry| (entry.0.clone(), entry.1))
                 .collect();
-            compiler.plan.derived_params.push((buf_ref, sources));
+            compiler
+                .plan
+                .derived_params
+                .push((buf_ref, sources, dp.transform.clone()));
         }
     }
 
@@ -1239,6 +1258,88 @@ impl<'a> Compiler<'a> {
                         padding,
                         out_h,
                         out_w,
+                        0,
+                    ],
+                    use_coop: false,
+                    use_small_tiles: false,
+                    label: String::new(),
+                });
+            }
+
+            Op::WinogradConv2d {
+                in_channels,
+                in_h,
+                in_w,
+                out_channels,
+                padding,
+            } => {
+                let out_h = in_h + 2 * padding - 2; // 3x3 stride 1
+                let out_w = in_w + 2 * padding - 2;
+                let batch_size = node.ty.shape[0] as u32 / (out_channels * out_h * out_w);
+                let tiles_h = (out_h + 1) / 2;
+                let tiles_w = (out_w + 1) / 2;
+                let total_tiles = batch_size * tiles_h * tiles_w;
+
+                // Temp buffers
+                let input_xform_size = (16 * in_channels * total_tiles * 4) as usize;
+                let mm_out_size = (16 * out_channels * total_tiles * 4) as usize;
+                let input_xform_buf = self.alloc_buffer(input_xform_size);
+                let mm_out_buf = self.alloc_buffer(mm_out_size);
+
+                let input = self.get_buffer(node.inputs[0]);
+                let weight_xform = self.get_buffer(node.inputs[1]); // pre-transformed weights [16*Co*Ci]
+
+                // Dispatch 1: Input transform
+                self.plan.dispatches.push(Dispatch {
+                    shader: ShaderEntry::WinogradInputTransform,
+                    workgroups: [ceil_div(total_tiles * in_channels, 256), 1, 1],
+                    input_buffers: vec![input],
+                    output_buffer: input_xform_buf,
+                    extra_output: None,
+                    params: vec![
+                        batch_size,
+                        in_channels,
+                        in_h,
+                        in_w,
+                        padding,
+                        tiles_h,
+                        tiles_w,
+                        total_tiles,
+                    ],
+                    use_coop: false,
+                    use_small_tiles: false,
+                    label: String::new(),
+                });
+
+                // Dispatch 2: Batched matmul
+                // weight_xform[16, Co, Ci] × input_xform[16, Ci, P] → mm_out[16, Co, P]
+                self.plan.dispatches.push(Dispatch {
+                    shader: ShaderEntry::WinogradBatchedMatMul,
+                    workgroups: [ceil_div(total_tiles, 64), ceil_div(out_channels, 64), 16],
+                    input_buffers: vec![weight_xform, input_xform_buf],
+                    output_buffer: mm_out_buf,
+                    extra_output: None,
+                    params: vec![out_channels, total_tiles, in_channels, 0],
+                    use_coop: false,
+                    use_small_tiles: false,
+                    label: String::new(),
+                });
+
+                // Dispatch 3: Output transform
+                self.plan.dispatches.push(Dispatch {
+                    shader: ShaderEntry::WinogradOutputTransform,
+                    workgroups: [ceil_div(total_tiles * out_channels, 256), 1, 1],
+                    input_buffers: vec![mm_out_buf],
+                    output_buffer: out_buf,
+                    extra_output: None,
+                    params: vec![
+                        batch_size,
+                        out_channels,
+                        out_h,
+                        out_w,
+                        tiles_h,
+                        tiles_w,
+                        total_tiles,
                         0,
                     ],
                     use_coop: false,

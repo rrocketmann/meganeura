@@ -117,6 +117,10 @@ pub enum ShaderGroup {
     Conv2dGradInputGemmSmall,
     Conv2dGradInputGemmCoop,
     GroupNormSilu,
+    WinogradInputTransform,
+    WinogradOutputTransform,
+    WinogradBatchedMatMul,
+    WinogradBatchedMatMulSmall,
     Conv2dGradWeight,
     Conv2dGradWeightGemm,
     Conv2dGradWeightGemmSmall,
@@ -183,6 +187,13 @@ pub fn generate_module(group: ShaderGroup) -> ShaderModule {
         ShaderGroup::Conv2dGradInputGemmSmall => gen_conv2d_grad_input_gemm_small(),
         ShaderGroup::Conv2dGradInputGemmCoop => gen_conv2d_grad_input_gemm_coop(),
         ShaderGroup::GroupNormSilu => gen_group_norm_silu(),
+        ShaderGroup::WinogradInputTransform => gen_winograd_input_transform(),
+        ShaderGroup::WinogradOutputTransform => gen_winograd_output_transform(),
+        ShaderGroup::WinogradBatchedMatMul => gen_winograd_batched_matmul(),
+        ShaderGroup::WinogradBatchedMatMulSmall => {
+            // Placeholder — shader not yet written, reuse regular for now
+            gen_winograd_batched_matmul()
+        }
         ShaderGroup::Conv2dGradWeight => gen_conv2d_grad_weight(),
         ShaderGroup::Conv2dGradWeightGemm => gen_conv2d_grad_weight_gemm(),
         ShaderGroup::Conv2dGradWeightGemmSmall => gen_conv2d_grad_weight_gemm_small(),
@@ -926,6 +937,22 @@ fn gen_group_norm_silu() -> ShaderModule {
 }
 
 // ---------------------------------------------------------------------------
+// winograd — Winograd F(2,3) convolution transforms and batched matmul
+// ---------------------------------------------------------------------------
+
+fn gen_winograd_input_transform() -> ShaderModule {
+    parse_wgsl(include_str!("shaders/winograd_input_transform.wgsl"))
+}
+
+fn gen_winograd_output_transform() -> ShaderModule {
+    parse_wgsl(include_str!("shaders/winograd_output_transform.wgsl"))
+}
+
+fn gen_winograd_batched_matmul() -> ShaderModule {
+    parse_wgsl(include_str!("shaders/winograd_matmul.wgsl"))
+}
+
+// ---------------------------------------------------------------------------
 // concat.wgsl — Channel concatenation
 // ---------------------------------------------------------------------------
 
@@ -1515,6 +1542,12 @@ mod tests {
                     vec!["grad_out", "src", "dst", "params"]
                 }
                 ShaderEntry::RoPEDynamic => vec!["src", "dst", "pos_offset_buf", "params"],
+                ShaderEntry::WinogradInputTransform | ShaderEntry::WinogradOutputTransform => {
+                    vec!["src", "dst", "params"]
+                }
+                ShaderEntry::WinogradBatchedMatMul | ShaderEntry::WinogradBatchedMatMulSmall => {
+                    vec!["matrix_a", "matrix_b", "matrix_c", "params"]
+                }
             }
         }
 
@@ -1580,6 +1613,9 @@ mod tests {
             ShaderEntry::Conv2dGradInputGemm,
             ShaderEntry::Conv2dGradInputGemmSmall,
             ShaderEntry::Conv2dGradWeight,
+            ShaderEntry::WinogradInputTransform,
+            ShaderEntry::WinogradOutputTransform,
+            ShaderEntry::WinogradBatchedMatMul,
             ShaderEntry::CacheWrite,
             ShaderEntry::CachedAttention,
             ShaderEntry::RoPEDynamic,
