@@ -118,6 +118,7 @@ pub enum ShaderGroup {
     Conv2dGradInputGemmCoop,
     Conv2dGradWeight,
     Conv2dGradWeightGemm,
+    Conv2dGradWeightGemmSmall,
     CacheWrite,
     CachedAttention,
     RoPEDynamic,
@@ -182,6 +183,7 @@ pub fn generate_module(group: ShaderGroup) -> ShaderModule {
         ShaderGroup::Conv2dGradInputGemmCoop => gen_conv2d_grad_input_gemm_coop(),
         ShaderGroup::Conv2dGradWeight => gen_conv2d_grad_weight(),
         ShaderGroup::Conv2dGradWeightGemm => gen_conv2d_grad_weight_gemm(),
+        ShaderGroup::Conv2dGradWeightGemmSmall => gen_conv2d_grad_weight_gemm_small(),
         ShaderGroup::CacheWrite => gen_cache_write(),
         ShaderGroup::CachedAttention => gen_cached_attention(),
         ShaderGroup::RoPEDynamic => gen_rope_dynamic(),
@@ -1068,6 +1070,10 @@ fn gen_conv2d_grad_weight_gemm() -> ShaderModule {
     parse_wgsl(include_str!("shaders/conv2d_grad_weight_gemm.wgsl"))
 }
 
+fn gen_conv2d_grad_weight_gemm_small() -> ShaderModule {
+    parse_wgsl(include_str!("shaders/conv2d_grad_weight_gemm_small.wgsl"))
+}
+
 fn gen_cache_write() -> ShaderModule {
     parse_wgsl(include_str!("shaders/cache_write.wgsl"))
 }
@@ -1495,7 +1501,9 @@ mod tests {
                 ShaderEntry::Conv2dGradInputGemmCoop => {
                     vec!["grad_out", "weight", "dst", "params"]
                 }
-                ShaderEntry::Conv2dGradWeight | ShaderEntry::Conv2dGradWeightGemm => {
+                ShaderEntry::Conv2dGradWeight
+                | ShaderEntry::Conv2dGradWeightGemm
+                | ShaderEntry::Conv2dGradWeightGemmSmall => {
                     vec!["grad_out", "src", "dst", "params"]
                 }
                 ShaderEntry::RoPEDynamic => vec!["src", "dst", "pos_offset_buf", "params"],
