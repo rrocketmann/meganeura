@@ -674,9 +674,9 @@ fn shader_data_layout(entry: &ShaderEntry) -> blade_graphics::ShaderDataLayout {
         ShaderEntry::Conv2dGradInputGemm
         | ShaderEntry::Conv2dGradInputGemmSmall
         | ShaderEntry::Conv2dGradInputGemmCoop => Conv2dGradInputData::layout(),
-        ShaderEntry::Conv2dGradWeight | ShaderEntry::Conv2dGradWeightGemm => {
-            Conv2dGradWeightData::layout()
-        }
+        ShaderEntry::Conv2dGradWeight
+        | ShaderEntry::Conv2dGradWeightGemm
+        | ShaderEntry::Conv2dGradWeightGemmSmall => Conv2dGradWeightData::layout(),
         ShaderEntry::RoPEDynamic => RoPEDynamicData::layout(),
         ShaderEntry::CacheWrite => CacheWriteData::layout(),
         ShaderEntry::CachedAttention => CachedAttentionData::layout(),
@@ -2161,7 +2161,9 @@ impl Session {
                     },
                 );
             }
-            ShaderEntry::Conv2dGradWeight | ShaderEntry::Conv2dGradWeightGemm => {
+            ShaderEntry::Conv2dGradWeight
+            | ShaderEntry::Conv2dGradWeightGemm
+            | ShaderEntry::Conv2dGradWeightGemmSmall => {
                 let p = &dispatch.params;
                 pc.bind(
                     0,
