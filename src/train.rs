@@ -241,7 +241,10 @@ pub fn build_inference_session(forward_graph: &Graph) -> Session {
     if !inference_fusions.is_empty() {
         for (name, count) in inference_fusions.iter().fold(
             std::collections::BTreeMap::<&str, usize>::new(),
-            |mut acc, entry| { *acc.entry(entry.0.as_str()).or_default() += 1; acc },
+            |mut acc, entry| {
+                *acc.entry(entry.0.as_str()).or_default() += 1;
+                acc
+            },
         ) {
             log::info!("inference fusion: {}x {}", count, name);
         }

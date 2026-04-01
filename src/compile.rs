@@ -288,6 +288,7 @@ pub struct ExecutionPlan {
     /// Derived parameters: buffer computed from source parameters.
     /// Created by the optimizer when fusing e.g. gate+up projections or Winograd weight transforms.
     /// Format: (derived_buf, [(source_name, num_elements), ...], transform)
+    #[allow(clippy::type_complexity)] //TODO
     pub derived_params: Vec<(
         BufferRef,
         Vec<(String, usize)>,
@@ -1276,8 +1277,8 @@ impl<'a> Compiler<'a> {
                 let out_h = in_h + 2 * padding - 2; // 3x3 stride 1
                 let out_w = in_w + 2 * padding - 2;
                 let batch_size = node.ty.shape[0] as u32 / (out_channels * out_h * out_w);
-                let tiles_h = (out_h + 1) / 2;
-                let tiles_w = (out_w + 1) / 2;
+                let tiles_h = out_h.div_ceil(2);
+                let tiles_w = out_w.div_ceil(2);
                 let total_tiles = batch_size * tiles_h * tiles_w;
 
                 // Temp buffers

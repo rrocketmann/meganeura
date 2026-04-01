@@ -274,7 +274,7 @@ fn graph_to_egglog(graph: &Graph) -> String {
   (Conv2d Op Op)
   (Conv2dGradInput Op Op)
   (Conv2dGradWeight Op Op)
-  (WinogradConv2d Op Op)
+  (WinogradConv2d Op Op Op)
   ; --- KV cache ops ---
   (CacheWrite Op Op Op)
   (CachedAttention Op Op Op Op)
@@ -435,7 +435,7 @@ fn node_to_egglog_expr(node: &Node) -> String {
         Op::Conv2d { .. } => format!("(Conv2d n{} n{})", i[0], i[1]),
         Op::Conv2dGradInput { .. } => format!("(Conv2dGradInput n{} n{})", i[0], i[1]),
         Op::Conv2dGradWeight { .. } => format!("(Conv2dGradWeight n{} n{})", i[0], i[1]),
-        Op::WinogradConv2d { .. } => format!("(WinogradConv2d n{} n{})", i[0], i[1]),
+        Op::WinogradConv2d { .. } => format!("(WinogradConv2d n{} n{} n{})", i[0], i[1], i[2]),
         Op::CacheWrite => format!("(CacheWrite n{} n{} n{})", i[0], i[1], i[2]),
         Op::CachedAttention { .. } => {
             format!("(CachedAttention n{} n{} n{} n{})", i[0], i[1], i[2], i[3])
@@ -810,6 +810,7 @@ pub fn apply_winograd_conv_fusions(graph: &mut Graph, fusions: &mut Vec<(String,
         );
 
         // Rewrite Conv2d → WinogradConv2d
+        // Keep original weight as 3rd input for backward pass (grad_input/grad_weight)
         graph.nodes_mut()[id].op = Op::WinogradConv2d {
             in_channels,
             in_h,
@@ -817,7 +818,7 @@ pub fn apply_winograd_conv_fusions(graph: &mut Graph, fusions: &mut Vec<(String,
             out_channels,
             padding,
         };
-        graph.nodes_mut()[id].inputs = vec![input_id, wino_param];
+        graph.nodes_mut()[id].inputs = vec![input_id, wino_param, weight_id];
 
         fusions.push(("Conv2d(3x3)→WinogradConv2d".to_string(), id as u32));
     }

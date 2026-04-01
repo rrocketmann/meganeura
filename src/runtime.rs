@@ -1217,15 +1217,14 @@ impl Session {
                 // derived buffer according to the transform type.
                 for entry in &self.plan.derived_params {
                     let derived_buf = &entry.0;
-                    let sources = &entry.1;
-                    let transform = &entry.2;
+                    let sources = entry.1.as_slice();
 
                     // Check if this source name is referenced
                     if !sources.iter().any(|s| s.0 == name) {
                         continue;
                     }
 
-                    match transform {
+                    match entry.2 {
                         crate::graph::ParamTransform::HorizontalConcat => {
                             // Row-interleaved layout: for each row, source A's
                             // columns come first, then source B's columns.
@@ -1262,8 +1261,6 @@ impl Session {
                             out_channels,
                             in_channels,
                         } => {
-                            let out_channels = *out_channels;
-                            let in_channels = *in_channels;
                             // G matrix for Winograd F(2,3)
                             let g: [[f32; 3]; 4] = [
                                 [1.0, 0.0, 0.0],
@@ -1293,6 +1290,7 @@ impl Session {
                                         }
                                     }
                                     // Then: u = tmp × G^T (4×4)
+                                    #[allow(clippy::needless_range_loop)]
                                     for r in 0..4 {
                                         for c in 0..4 {
                                             let mut val = 0.0f32;
@@ -1453,7 +1451,7 @@ impl Session {
             entry.1 += dur;
         }
         let mut sorted: Vec<_> = by_type.into_iter().collect();
-        sorted.sort_by(|a, b| b.1 .1.cmp(&a.1 .1));
+        sorted.sort_by(|a, b| b.1.1.cmp(&a.1.1));
         for &(name, (count, dur)) in &sorted {
             let pct = dur.as_secs_f64() / total.as_secs_f64() * 100.0;
             eprintln!(
