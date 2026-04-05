@@ -1,4 +1,50 @@
-# v0.2 (TBD)
+# v0.2 (4 Apr 2026)
+
+## Inference & models
+- Conv2d forward/backward via implicit GEMM (im2col fused into matmul)
+- MaxPool2d, GlobalAvgPool ops; GroupNormSilu fused op
+- KV cache infrastructure for autoregressive decode
+- U-Net, ResNet-50, and Whisper example models
+- ONNX and NNEF model loaders
+- macOS / Metal support improvements
+
+## Training
+- Differentiable MultiHeadAttn with GQA and CausalAttention backward
+- nn module with Adam optimizer and SGD
+- Abs/Log/Recip ops, ScatterAdd, MSE/L1 losses, Embedding backward
+- GELU backward, SumRows op for bias/RmsNorm weight gradients
+- Weight sharing and checkpointing support
+- Metrics callbacks and MemorySummary
+
+## Optimizations
+- 4×4 register-tiled matmul: 1.5× faster forward, beats PyTorch inference
+- 4×4 register-tiled backward matmuls with fused grad accumulation
+- Generalize cooperative matrix for any tile size and precision
+- 32×32 small-tile matmul/conv shader variants for low-occupancy layers
+- Fuse SGD into step() submission (130ms → 99ms training)
+- SwiGLUConcat: merge gate+up into single matmul
+- Fused SwiGLU/Silu backward ops
+- Fused RmsNorm+MatMul kernel (disabled, needs cost model)
+- Parallelize Conv2dGradWeight and GroupNormGradW shaders
+- K-aware coop threshold for high-K backward matmuls
+- e-graph: encode full graph with SwiGLU fusion, optimize before autodiff
+- Pre-compute barrier group pass names at session creation
+
+## Correctness fixes
+- Fix O(rows×cols²) complexity in RmsNormGradW shader
+- Fix attention backward precision: store scores, add weight tying
+- Fix derived_params lost during autodiff
+- Fix GroupNorm grad race condition
+- Fix RoPE convention and dispatch ordering
+- Fix Adam buffer cleanup
+- Various Metal execution fixes
+
+## Infrastructure
+- Switch codegen to WGSL templating
+- CI latency benchmark with regression detection
+- Conv2d split padding into h/w dimensions
+- Windows compatibility, automated venv setup
+- SmolVLA training benchmark
 
 # v0.1 (26 Mar 2026)
 
